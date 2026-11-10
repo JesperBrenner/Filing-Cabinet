@@ -1,0 +1,1053 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Filing Cabinet</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Special+Elite&family=Inter:wght@400;500&display=swap" rel="stylesheet" />
+<style>
+  :root {
+    --bg-top: #ffffff;
+    --bg-bottom: #ffffff;
+    --ink: #3b3833;
+    --muted: #7a746a;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: radial-gradient(ellipse at 50% 35%, var(--bg-top) 0%, var(--bg-bottom) 75%);
+    color: var(--ink);
+    font-family: Inter, system-ui, sans-serif;
+    overflow: hidden;
+    touch-action: none;
+  }
+  #stage { position: fixed; inset: 0; }
+  #stage canvas { display: block; width: 100%; height: 100%; }
+  .nav {
+    position: fixed; top: 50%; transform: translateY(-50%);
+    width: 36px; height: 36px; border-radius: 50%;
+    border: 1px solid #d6d9dc; background: #fff; color: #3b3f43;
+    display: grid; place-items: center; cursor: pointer;
+    padding: 0;
+    opacity: 0; pointer-events: none;
+    transition: opacity .3s, background .15s;
+  }
+  .nav svg { width: 16px; height: 16px; }
+  .nav.show { opacity: 1; pointer-events: auto; }
+  .nav.show:disabled { opacity: .3; cursor: default; }
+  .nav:not(:disabled):hover { background: #f4f5f6; }
+  .nav:focus-visible { outline: 2px solid #3b6fd1; outline-offset: 3px; }
+  #prev { left: max(16px, 6vw); }
+  #next { right: max(16px, 6vw); }
+  #count {
+    position: fixed; left: 0; right: 0; bottom: 24px; text-align: center;
+    font: 15px "Helvetica Neue", Helvetica, Arial, sans-serif; color: #4a4e52;
+    opacity: 0; transition: opacity .3s; pointer-events: none;
+  }
+  #count.show { opacity: 1; }
+  #count { display: none; }
+  /* image caption: bottom-left corner */
+  #caption {
+    position: fixed; left: 24px; bottom: 22px; z-index: 3;
+    max-width: min(380px, calc(100vw - 48px));
+    text-wrap: balance;   /* even line lengths -> a tidier rectangle */
+    font: 13px/1.45 "Helvetica Neue", Helvetica, Arial, sans-serif; color: #3f4347;
+    opacity: 0; transition: opacity .3s; pointer-events: none;
+  }
+  #caption.show { opacity: 1; }
+  #caption em { font-style: italic; }
+  #count { z-index: 3; }
+  .nav { z-index: 3; }
+  #lightbox {
+    position: fixed; inset: 0; z-index: 2;
+    background: rgba(255,255,255,.96);
+    overflow-y: auto; overscroll-behavior: contain;
+    padding: 64px calc(max(16px, 6vw) + 52px);
+    opacity: 0; pointer-events: none; transition: opacity .25s;
+    cursor: zoom-out;
+  }
+  #lightbox.show { opacity: 1; pointer-events: auto; }
+  #lightbox .lb-inner {
+    min-height: 100%; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 28px;
+  }
+  #lightbox img {
+    display: block; max-width: min(100%, 1400px); max-height: calc(100vh - 150px);
+    object-fit: contain;
+    transform: scale(.96); transition: transform .3s cubic-bezier(.2,.8,.2,1);
+  }
+  #lightbox.show img { transform: scale(1); }
+  /* multi-page documents: pages stack vertically and scroll */
+  #lightbox.pages img {
+    width: min(100%, 900px); max-height: none; height: auto; cursor: default;
+    box-shadow: 0 0 0 1px #e1e4e6;
+  }
+  /* narrow screens: arrows move to the bottom, beside the caption */
+  @media (max-width: 600px) {
+    #lightbox { padding: 56px 16px 80px; }
+    .nav { top: auto; bottom: 16px; transform: none; }
+    #caption { left: 16px; bottom: 66px; max-width: min(380px, calc(100vw - 32px)); }
+    #prev { left: 16px; } #next { right: 16px; }
+  }
+</style>
+</head>
+<body>
+<div id="stage"></div>
+<button class="nav" id="prev" aria-label="Previous file">
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 5l-7 7 7 7"/></svg>
+</button>
+<button class="nav" id="next" aria-label="Next file">
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 5l7 7-7 7"/></svg>
+</button>
+<div id="count"></div>
+<div id="caption" aria-live="polite"></div>
+<div id="lightbox" role="dialog" aria-label="Expanded image"><div class="lb-inner"></div></div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
+
+/* ------------------------------------------------------------------
+   Placeholder content — edit these to change labels and files.
+   Each file can be a plain name (gets a generated placeholder image)
+   or an object with a real image, e.g.
+     { name: 'Taxes 2024', image: 'images/taxes-2024.jpg' }
+   Images of any aspect ratio are scaled to fit inside the folder.
+   Multi-page documents use `pages` instead of `image`:
+     { name: 'Deed', pages: ['images/deed-1.jpg', 'images/deed-2.jpg'] }
+   They rise as a fanned stack and open as a scrollable set of pages.
+   `caption` is shown bottom-left while the file is up; it may contain <em>italics</em>.
+   Captions that are just a number are placeholders still to be filled in.
+------------------------------------------------------------------- */
+const DRAWERS = [
+  { label: 'NYC Transit Substations', sub: '',
+    files: [
+      { name: 'Substation Map',              caption: 'Map of all DC substations in Manhattan, c. early 1930s. From Christopher Payne, <em>New York’s Forgotten Substations</em>, 2002, p. 52',
+        image: 'images/substations-1.jpg' },
+      { name: 'Manhattan Railway Station 8', caption: 'Christopher Payne, Manhattan Railway Co. Station 8, Bronx. From the series <em>Substations</em>, 1997–2002',
+        image: 'images/substations-2.jpg' },
+      { name: 'Substation Facade',           caption: 'Christopher Payne, substation facade, Manhattan. From the series <em>Substations</em>, 1997–2002',
+        image: 'images/substations-3.jpg' },
+      { name: 'Harlem Substation',           caption: 'Christopher Payne, Harlem Substation, a typical IND rotary converter substation. From <em>New York’s Forgotten Substations</em>, 2002, p. 48',
+        image: 'images/substations-4.jpg' },
+      { name: 'Rotary Converter',            caption: 'Christopher Payne, rotary converter. From the series <em>Substations</em>, 1997–2002',
+        image: 'images/substations-5.jpg' },
+      { name: 'Switchboard',                 caption: 'Christopher Payne, DC feeder switchboard. From the series <em>Substations</em>, 1997–2002',
+        image: 'images/substations-6.jpg' },
+      { name: 'Contract One Plans',          caption: 'Contract One substation, plan and sections. From Christopher Payne, <em>New York’s Forgotten Substations</em>, 2002, p. 38',
+        image: 'images/substations-7.jpg' },
+      { name: 'Dual Contract Plans',         caption: 'Dual Contract substation, section and plan. From Christopher Payne, <em>New York’s Forgotten Substations</em>, 2002, p. 42',
+        image: 'images/substations-8.jpg' },
+    ] },
+  { label: '415 Broome Street, NYC', sub: '',
+    files: [
+      { name: 'Street Facade',      caption: 'Jesper Brenner, <em>Site Photos</em>, 2026',
+        image: 'images/broome-1.jpg' },
+      { name: 'Mural Above',        caption: 'Jesper Brenner, <em>Site Photos</em>, 2026',
+        image: 'images/broome-2.jpg' },
+      { name: 'Neighboring Wall',   caption: 'Jesper Brenner, <em>Site Photos</em>, 2026',
+        image: 'images/broome-3.jpg' },
+      { name: 'Sidewalk View',      caption: 'Jesper Brenner, <em>Site Photos</em>, 2026',
+        image: 'images/broome-4.jpg' },
+      { name: 'Elevation Drawing',  caption: '415 Broome St. Elevation',
+        image: 'images/broome-5.jpg' },
+      { name: 'Substation Interior', caption: 'Christopher Payne, Greenwich Substation, with modern silicon diode rectifiers. From <em>New York’s Forgotten Substations</em>, 2002, p. 100', image: 'images/broome-interior.jpg' },
+      { name: 'Archival Tax Photo', caption: '415 Broome St. (Block 473, Lot 38), c. 1983–88. Tax photograph, NYC Municipal Archives',
+        image: 'images/broome-6.jpg' },
+      { name: 'Tax Photo, Block 473 Lot 38', caption: 'Block 473, Lot 38, c. 1939–41. Tax photograph, NYC Municipal Archives',
+        image: 'images/broome-7.jpg' },
+      { name: 'Broome & Elm Sts, 1902',      caption: 'IRT construction, Broome & Elm Sts., Feb. 10, 1902. New York Transit Museum',
+        image: 'images/broome-8.jpg' },
+      { name: 'Broome & Elm Sts, 1901',      caption: 'IRT construction, Broome & Elm Sts., Oct. 16, 1901. New York Transit Museum',
+        image: 'images/broome-9.jpg' },
+      { name: 'Transit Authority Memorandum',
+        caption: 'NYC Transit Authority, memorandum on acquiring Block 473, Lot 38 for a power substation. ACRIS, Reel 194, p. 242',
+        pages: [1, 2, 3].map(k => `images/broome-inquiry-a-${k}.jpg`) },
+      { name: 'Condemnation Final Decree',
+        caption: 'NY Supreme Court, final decree condemning Block 473, Lot 38 for an IRT substation, July 3, 1968. ACRIS, Reel 336, p. 54',
+        pages: [1, 2, 3, 4, 5, 6].map(k => `images/broome-inquiry-b-${k}.jpg`) },
+    ] },
+  { label: 'Impressions and Opacity', sub: '',
+    files: [
+      { name: 'Concrete Cast',       caption: 'Bruce Nauman, <em>A Cast of the Space Under My Chair</em>, 1965–68',
+        image: 'images/impressions-1.jpg' },
+      { name: 'Cast Staircase',      caption: 'Rachel Whiteread, <em>Untitled (Domestic)</em>, 2002',
+        image: 'images/impressions-2.jpg' },
+      { name: 'Cast Bookshelves',    caption: 'Rachel Whiteread, <em>Untitled (Book Corridors)</em>, 1997–98',
+        image: 'images/impressions-3.jpg' },
+      { name: 'Peeling the Cast',    caption: 'Robert Overby, <em>Saulle\'s Place</em>, 1971',
+        image: 'images/impressions-4.jpg' },
+      { name: 'Latex Room',          caption: 'Heidi Bucher, <em>Herrenzimmer</em>, 1978. Photo: Hans Peter Siffert',
+        image: 'images/impressions-5.jpg' },
+      { name: 'Hand Impressions',    caption: 'Quesang hand and footprints, Tibetan Plateau, between 169,000 and 226,000 years ago',
+        image: 'images/impressions-6.jpg' },
+      { name: 'Relief Figure',       caption: 'Allan Wexler, <em>Wall (I Want to Become Architecture)</em>, 2002',
+        image: 'images/impressions-7.jpg' },
+      { name: 'Dust Breeding',       caption: 'Man Ray and Marcel Duchamp, <em>Dust Breeding</em>, 1920',
+        image: 'images/impressions-8.jpg' },
+    ] },
+];
+
+/* ------------------------------------------------------------------
+   Dimensions (scene units)
+------------------------------------------------------------------- */
+const W = 1.7;          // cabinet width
+const H = 3.6;          // cabinet height
+const D = 2.6;          // cabinet depth
+const T = 0.05;         // wall thickness
+const PLINTH = 0.14;    // recessed base height
+const FRONT_Z = D / 2;  // cabinet front plane
+const Y0 = PLINTH + T, Y1 = H - T;
+const SLOT_H = (Y1 - Y0) / DRAWERS.length;
+const FT = 0.06;        // drawer front thickness
+const DD = D - 0.15;    // drawer body depth
+const MAX_EXT = DD - 0.08;
+const FOLDER_POP = 0.42; // how far the folder itself lifts
+const REVEAL = 0.4;        // how far past the cabinet front the current file sits
+const IMAGE_GROW = 6;     // max growth once raised; capped so the image fits the screen
+const TOP_MARGIN = 0.035; // gap above the tallest raised image, as a fraction of screen height
+const FIT_WIDTH = 0.92;   // raised images may use up to this fraction of the screen width
+const FIT_HEIGHT = 0.72;  // ...and this fraction of the screen height
+const LIFT_TIME = 0.55;    // seconds for an image to rise (or sink)
+const OPEN_SPEED = 5;      // spring rate for drawer motion (lower = slower)
+const CAM_SPEED = 3;       // how quickly the view reframes
+
+/* ------------------------------------------------------------------
+   Renderer / scene / camera
+------------------------------------------------------------------- */
+const stage = document.getElementById('stage');
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.0;
+renderer.shadowMap.enabled = true;
+renderer.localClippingEnabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+stage.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const pmrem = new THREE.PMREMGenerator(renderer);
+scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+
+const camera = new THREE.PerspectiveCamera(36, 1, 0.1, 100);
+const camTarget = new THREE.Vector3(0, H * 0.5, FRONT_Z + 1.0);
+let camDist = 12;
+const camGoal = { target: camTarget.clone(), dist: 12 };
+const camDir = new THREE.Vector3(0, 0.55, 1).normalize();
+
+/* Lights */
+scene.add(new THREE.HemisphereLight(0xfff8ee, 0x5a5048, 0.55));
+const key = new THREE.DirectionalLight(0xfff4e6, 2.2);
+key.position.set(3.5, 9, 7);
+key.castShadow = true;
+key.shadow.mapSize.set(2048, 2048);
+key.shadow.camera.left = -5; key.shadow.camera.right = 5;
+key.shadow.camera.top = 6; key.shadow.camera.bottom = -4;
+key.shadow.camera.near = 1; key.shadow.camera.far = 30;
+key.shadow.bias = -0.0004;
+key.shadow.normalBias = 0.02;
+key.shadow.radius = 4;
+scene.add(key);
+const fill = new THREE.DirectionalLight(0xdfe8ff, 0.6);
+fill.position.set(-6, 4, 5);
+scene.add(fill);
+
+/* Floor (shadow catcher) */
+const floor = new THREE.Mesh(
+  new THREE.PlaneGeometry(40, 40),
+  new THREE.ShadowMaterial({ opacity: 0.14 })
+);
+floor.rotation.x = -Math.PI / 2;
+floor.receiveShadow = true;
+scene.add(floor);
+
+/* ------------------------------------------------------------------
+   Textures
+------------------------------------------------------------------- */
+function brushedTexture() {
+  const c = document.createElement('canvas');
+  c.width = c.height = 512;
+  const g = c.getContext('2d');
+  g.fillStyle = '#e2e5e8';
+  g.fillRect(0, 0, 512, 512);
+  for (let i = 0; i < 2600; i++) {
+    const y = Math.random() * 512;
+    const v = 180 + Math.random() * 60;
+    g.strokeStyle = `rgba(${v},${v + 2},${v + 5},${0.08 + Math.random() * 0.12})`;
+    g.lineWidth = Math.random() * 1.2 + 0.2;
+    g.beginPath();
+    const x = Math.random() * 512;
+    g.moveTo(x - 200, y);
+    g.lineTo(x + 200, y + (Math.random() - 0.5) * 2);
+    g.stroke();
+  }
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  t.anisotropy = 8;
+  return t;
+}
+
+function labelCardTexture(label, sub, ink = '#2b2a28') {
+  const c = document.createElement('canvas');
+  c.width = 512; c.height = 220;
+  const g = c.getContext('2d');
+  g.fillStyle = '#f4efe2';
+  g.fillRect(0, 0, c.width, c.height);
+  // faint ruled lines
+  g.strokeStyle = 'rgba(120,140,180,0.25)';
+  g.lineWidth = 2;
+  for (let y = 40; y < c.height; y += 44) {
+    g.beginPath(); g.moveTo(0, y); g.lineTo(c.width, y); g.stroke();
+  }
+  g.strokeStyle = 'rgba(200,80,80,0.35)';
+  g.beginPath(); g.moveTo(60, 0); g.lineTo(60, c.height); g.stroke();
+  g.fillStyle = ink;
+  g.textAlign = 'center';
+  g.textBaseline = 'middle';
+  const font = px => `${px}px Courier, "Courier New", monospace`;
+  const cx = c.width / 2, maxW = c.width - 90;   // centred on the card
+  // long labels wrap onto two balanced lines and shrink to fit
+  let lines = [label];
+  g.font = font(92);
+  if (g.measureText(label).width > maxW && label.includes(' ')) {
+    const words = label.split(' ');
+    let best = null;
+    for (let k = 1; k < words.length; k++) {
+      const pair = [words.slice(0, k).join(' '), words.slice(k).join(' ')];
+      const w = Math.max(...pair.map(t => g.measureText(t).width));
+      if (!best || w < best.w) best = { w, pair };
+    }
+    lines = best.pair;
+  }
+  let size = lines.length > 1 ? 66 : 92;
+  g.font = font(size);
+  while (Math.max(...lines.map(t => g.measureText(t).width)) > maxW && size > 24) {
+    size -= 2; g.font = font(size);
+  }
+  const blockY = sub ? 92 : c.height / 2;
+  const lh = size * 1.05;
+  // 'alphabetic' baseline + measured ascent/descent centres the ink, not the em box
+  g.textBaseline = 'alphabetic';
+  const mtr = g.measureText(lines.join(''));
+  const inkMid = (mtr.actualBoundingBoxAscent - mtr.actualBoundingBoxDescent) / 2;
+  lines.forEach((t, k) => g.fillText(t, cx, blockY + (k - (lines.length - 1) / 2) * lh + inkMid));
+  g.textBaseline = 'middle';
+  if (sub) {
+    g.font = font(34);
+    g.fillStyle = '#5a554d';
+    g.fillText(sub, cx, 172);
+  }
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  t.anisotropy = 8;
+  return t;
+}
+
+function tabTexture(text, color) {
+  const c = document.createElement('canvas');
+  c.width = 384; c.height = 112;
+  const g = c.getContext('2d');
+  g.fillStyle = color;
+  g.fillRect(0, 0, c.width, c.height);
+  // white label sticker
+  g.fillStyle = '#fbf8f0';
+  g.fillRect(18, 22, c.width - 36, c.height - 40);
+  g.fillStyle = '#26241f';
+  g.textAlign = 'center';
+  g.textBaseline = 'middle';
+  let size = 46;
+  g.font = `${size}px "Special Elite", "Courier New", monospace`;
+  while (g.measureText(text).width > c.width - 60 && size > 20) {
+    size -= 2;
+    g.font = `${size}px "Special Elite", "Courier New", monospace`;
+  }
+  g.fillText(text, c.width / 2, 22 + (c.height - 40) / 2 + 2);
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  t.anisotropy = 8;
+  return t;
+}
+
+// Placeholder artwork until real images are supplied
+function placeholderImage(name, seed) {
+  const c = document.createElement('canvas');
+  const landscape = seed % 3 !== 1;
+  c.width = landscape ? 800 : 600; c.height = landscape ? 600 : 800;
+  const g = c.getContext('2d');
+  const hue = (seed * 47) % 360;
+  const grad = g.createLinearGradient(0, 0, c.width, c.height);
+  grad.addColorStop(0, `hsl(${hue},45%,72%)`);
+  grad.addColorStop(1, `hsl(${(hue + 50) % 360},40%,38%)`);
+  g.fillStyle = grad;
+  g.fillRect(0, 0, c.width, c.height);
+  // simple hills + sun so it reads as "a picture"
+  g.fillStyle = `hsla(${(hue + 30) % 360},70%,90%,0.85)`;
+  g.beginPath(); g.arc(c.width * 0.72, c.height * 0.3, c.width * 0.09, 0, Math.PI * 2); g.fill();
+  for (let k = 0; k < 2; k++) {
+    g.fillStyle = `hsla(${(hue + 160 + k * 20) % 360},30%,${28 - k * 8}%,0.75)`;
+    g.beginPath(); g.moveTo(0, c.height);
+    for (let x = 0; x <= c.width; x += 20) {
+      g.lineTo(x, c.height * (0.62 + k * 0.12) + Math.sin(x / (90 + k * 40) + seed) * 40);
+    }
+    g.lineTo(c.width, c.height); g.fill();
+  }
+  g.fillStyle = 'rgba(255,255,255,0.92)';
+  g.textAlign = 'center';
+  g.font = '56px "Special Elite", "Courier New", monospace';
+  g.fillText(name, c.width / 2, c.height * 0.5);
+  g.font = '28px "Special Elite", "Courier New", monospace';
+  g.fillText('placeholder image', c.width / 2, c.height * 0.5 + 48);
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  t.anisotropy = 8;
+  return t;
+}
+
+// page stacks: thickness of the black line on each page's bottom and right edge
+// (before the image grows, so it ends up a few pixels wide on screen)
+const PAGE_EDGE = 0.004;
+
+// drawer label text colour while the pointer is over that drawer
+const LABEL_HOVER_INK = '#0000EE';   // classic hyperlink blue
+
+/* ------------------------------------------------------------------
+   Materials
+------------------------------------------------------------------- */
+const brushed = brushedTexture();
+const steel = new THREE.MeshStandardMaterial({
+  color: 0xf0f2f4, map: brushed, metalness: 0.4, roughness: 0.38,
+});
+const steelFront = steel.clone();
+steelFront.map = brushed.clone();
+steelFront.map.needsUpdate = true;
+const steelDark = new THREE.MeshStandardMaterial({ color: 0xd2d7da, metalness: 0.4, roughness: 0.5 });
+const interior = new THREE.MeshStandardMaterial({ color: 0x1d1f21, metalness: 0.2, roughness: 0.9, side: THREE.BackSide });
+const drawerInner = new THREE.MeshStandardMaterial({ color: 0xdde1e4, metalness: 0.35, roughness: 0.55, map: brushed });
+const chrome = new THREE.MeshStandardMaterial({ color: 0xeeeeee, metalness: 1.0, roughness: 0.16 });
+const rubber = new THREE.MeshStandardMaterial({ color: 0x222222, roughness: 0.9 });
+
+const FOLDER_COLORS = ['#d9b77a', '#d4ae6d', '#7fa2c4', '#d9b77a', '#9cbf8a', '#d4ae6d', '#d98b7a', '#d9b77a'];
+
+function shadowed(mesh) { mesh.castShadow = true; mesh.receiveShadow = true; return mesh; }
+function box(w, h, d, mat, x = 0, y = 0, z = 0) {
+  const m = shadowed(new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat));
+  m.position.set(x, y, z);
+  return m;
+}
+
+/* ------------------------------------------------------------------
+   Cabinet shell
+------------------------------------------------------------------- */
+const cabinet = new THREE.Group();
+scene.add(cabinet);
+
+// sides, top, bottom, back
+cabinet.add(shadowed(new THREE.Mesh(new RoundedBoxGeometry(T, H - PLINTH, D, 2, 0.012), steel)));
+cabinet.children[0].position.set(-W / 2 + T / 2, PLINTH + (H - PLINTH) / 2, 0);
+const rightSide = cabinet.children[0].clone();
+rightSide.position.x = W / 2 - T / 2;
+cabinet.add(rightSide);
+const top = shadowed(new THREE.Mesh(new RoundedBoxGeometry(W + 0.02, T, D + 0.02, 2, 0.015), steel));
+top.position.set(0, H - T / 2, 0);
+cabinet.add(top);
+cabinet.add(box(W - 2 * T, T, D, steel, 0, PLINTH + T / 2, 0));
+cabinet.add(box(W - 2 * T, H - PLINTH, T, steel, 0, PLINTH + (H - PLINTH) / 2, -D / 2 + T / 2));
+// recessed plinth / kick plate
+cabinet.add(box(W - 0.12, PLINTH, D - 0.2, steelDark, 0, PLINTH / 2, -0.04));
+
+// dark interior liner (only its inner faces render)
+const liner = new THREE.Mesh(new THREE.BoxGeometry(W - 2 * T - 0.002, Y1 - Y0 - 0.002, D - T - 0.01), interior);
+liner.position.set(0, (Y0 + Y1) / 2, T / 2);
+liner.receiveShadow = true;
+cabinet.add(liner);
+
+// horizontal rails between drawers
+for (let i = 1; i < DRAWERS.length; i++) {
+  cabinet.add(box(W - 2 * T, 0.04, 0.08, steelDark, 0, Y0 + i * SLOT_H, FRONT_Z - 0.06));
+}
+// vertical front stiles
+cabinet.add(box(0.035, Y1 - Y0, 0.06, steelDark, -W / 2 + T + 0.017, (Y0 + Y1) / 2, FRONT_Z - 0.05));
+cabinet.add(box(0.035, Y1 - Y0, 0.06, steelDark, W / 2 - T - 0.017, (Y0 + Y1) / 2, FRONT_Z - 0.05));
+
+// little rubber feet
+for (const sx of [-1, 1]) for (const sz of [-1, 1]) {
+  const f = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.06, 0.03, 16), rubber);
+  f.position.set(sx * (W / 2 - 0.12), 0.015, sz * (D / 2 - 0.15));
+  cabinet.add(f);
+}
+
+/* ------------------------------------------------------------------
+   Drawers
+------------------------------------------------------------------- */
+const drawers = [];
+const IW = W - 2 * T - 0.06;          // drawer body outer width
+const BODY_H = SLOT_H * 0.7;           // drawer side height
+const SIDE_T = 0.025;
+
+function buildDrawer(def, index) {
+  // index 0 = top drawer
+  const slotBottom = Y1 - (index + 1) * SLOT_H;
+  const group = new THREE.Group();
+  group.position.set(0, slotBottom, FRONT_Z);
+  scene.add(group);
+
+  const fw = W - 0.05, fh = SLOT_H - 0.045;
+
+  // front panel
+  const front = shadowed(new THREE.Mesh(new RoundedBoxGeometry(fw, fh, FT, 3, 0.018), steelFront));
+  front.position.set(0, SLOT_H / 2, FT / 2);
+  group.add(front);
+
+  // label holder (chrome frame + card)
+  const lw = 0.62, lh = 0.27;
+  const labelY = SLOT_H * 0.68;
+  const frame = box(lw + 0.05, lh + 0.05, 0.012, chrome, 0, labelY, FT + 0.006);
+  group.add(frame);
+  const card = new THREE.Mesh(
+    new THREE.PlaneGeometry(lw, lh),
+    new THREE.MeshStandardMaterial({ map: labelCardTexture(def.label, def.sub), roughness: 0.85 })
+  
+  );
+  card.position.set(0, labelY, FT + 0.0125);
+  group.add(card);
+  // frame lip bits (top & sides overlap the card slightly)
+  group.add(box(lw + 0.05, 0.02, 0.006, chrome, 0, labelY + lh / 2 + 0.005, FT + 0.015));
+  group.add(box(0.02, lh + 0.03, 0.006, chrome, -lw / 2 - 0.005, labelY, FT + 0.015));
+  group.add(box(0.02, lh + 0.03, 0.006, chrome, lw / 2 + 0.005, labelY, FT + 0.015));
+
+  // handle: a bar on two posts
+  const handleY = SLOT_H * 0.38;
+  const bar = shadowed(new THREE.Mesh(new THREE.CapsuleGeometry(0.028, 0.5, 6, 16), chrome));
+  bar.rotation.z = Math.PI / 2;
+  bar.position.set(0, handleY, FT + 0.085);
+  group.add(bar);
+  for (const sx of [-0.24, 0.24]) {
+    const post = shadowed(new THREE.Mesh(new THREE.CylinderGeometry(0.018, 0.024, 0.085, 12), chrome));
+    post.rotation.x = Math.PI / 2;
+    post.position.set(sx, handleY, FT + 0.042);
+    group.add(post);
+  }
+  // keyhole on the top drawer
+  if (index === 0) {
+    const lock = shadowed(new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.04, 0.02, 24), chrome));
+    lock.rotation.x = Math.PI / 2;
+    lock.position.set(fw / 2 - 0.16, SLOT_H * 0.82, FT + 0.01);
+    group.add(lock);
+  }
+
+  // drawer body: bottom, sides, back (open top)
+  const by = 0.03;
+  group.add(box(IW, SIDE_T, DD, drawerInner, 0, by + SIDE_T / 2, -DD / 2));
+  group.add(box(SIDE_T, BODY_H, DD, drawerInner, -IW / 2 + SIDE_T / 2, by + BODY_H / 2, -DD / 2));
+  group.add(box(SIDE_T, BODY_H, DD, drawerInner, IW / 2 - SIDE_T / 2, by + BODY_H / 2, -DD / 2));
+  group.add(box(IW, BODY_H, SIDE_T, drawerInner, 0, by + BODY_H / 2, -DD + SIDE_T / 2));
+  // rolled lips on the sides
+  for (const sx of [-1, 1]) {
+    const lip = shadowed(new THREE.Mesh(new THREE.CylinderGeometry(0.018, 0.018, DD, 10), drawerInner));
+    lip.rotation.x = Math.PI / 2;
+    lip.position.set(sx * (IW / 2 - SIDE_T / 2), by + BODY_H, -DD / 2);
+    group.add(lip);
+  }
+  // hanging rails the folders hang from
+  for (const sx of [-1, 1]) {
+    group.add(box(0.012, 0.012, DD - 0.06, chrome, sx * (IW / 2 - SIDE_T - 0.01), by + BODY_H - 0.02, -DD / 2));
+  }
+
+  // files
+  const files = [];
+  const n = def.files.length;
+  const firstZ = 0.2, lastZ = DD - 0.6;
+  const folderW = IW - 0.1;
+  const folderH = BODY_H + 0.02;
+  const tabW = 0.42, tabH = 0.12;
+  def.files.forEach((entry, i) => {
+    const name = typeof entry === 'string' ? entry : entry.name;
+    const pages = typeof entry === 'string' ? null : entry.pages || null;   // multi-page document
+    const imageUrl = typeof entry === 'string' ? null : (pages ? pages[0] : entry.image);
+    const depth = firstZ + (lastZ - firstZ) * (i / (n - 1));
+    const color = FOLDER_COLORS[(i + index * 3) % FOLDER_COLORS.length];
+    const folderMat = new THREE.MeshStandardMaterial({ color, roughness: 0.85 });
+
+    const pivot = new THREE.Group();          // pivots around the folder's bottom edge
+    pivot.position.set(0, by + SIDE_T, -depth);
+    group.add(pivot);
+
+    // back cover (tallest), papers, front cover
+    pivot.add(box(folderW, folderH, 0.008, folderMat, 0, folderH / 2, -0.012));
+    // the picture: a print with a white border that slides up out of the folder
+    const sheet = new THREE.Group();
+    sheet.position.set(((i % 3) - 1) * 0.015, 0.02, 0);
+    pivot.add(sheet);
+    // Two clip planes: hide the part still inside the folder, and the part
+    // hidden behind this drawer's own front. Everything above that is drawn
+    // on top of the cabinet so the image never clips into it.
+    const clips = [new THREE.Plane(), new THREE.Plane()];
+    const border = shadowed(new THREE.Mesh(new THREE.BoxGeometry(1, 1, 0.006),
+      new THREE.MeshStandardMaterial({ color: 0xf7f5ef, roughness: 0.9, clippingPlanes: clips, transparent: true })));
+    sheet.add(border);
+    const photo = new THREE.Mesh(new THREE.PlaneGeometry(1, 1),
+      new THREE.MeshBasicMaterial({ clippingPlanes: clips, transparent: true, toneMapped: false }) /* unlit: shows the image's true tones */);
+    // nearer files draw later so they stay in front of deeper ones
+    // The floor's shadow is a transparent layer drawn after solid objects, so the
+    // pictures are marked transparent too and ordered after it; that way no
+    // shadow is ever painted over them. They also don't receive shadows.
+    border.receiveShadow = false;
+    border.visible = false;       // no white border around the pictures
+    border.renderOrder = 100 + (n - i) * 2;
+    photo.renderOrder = 101 + (n - i) * 2;
+    photo.position.z = 0.0035;
+    sheet.add(photo);
+    const file = { pivot, sheet, clips, lift: 0, mats: [border.material, photo.material], depth: 0, prog: 0, imgH: folderH * 0.9, pages };
+    // multi-page documents: plain white pages fanned behind the first one,
+    // each page edged with a thin black line along its bottom and right side
+    const STACK_OFF = 0.03;
+    const back = [], edges = [];
+    if (pages) {
+      const lineMat = () => {
+        const m = new THREE.MeshBasicMaterial({ color: 0x000000, clippingPlanes: clips, transparent: true, toneMapped: false });
+        file.mats.push(m);
+        return m;
+      };
+      const addEdges = (k) => {
+        const g = new THREE.Group();
+        const right = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), lineMat());
+        const bottom = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), lineMat());
+        right.renderOrder = bottom.renderOrder = photo.renderOrder - k * 0.1 + 0.01;
+        g.add(right, bottom);
+        g.position.z = 0.0035 - k * 0.004 + 0.0005;
+        sheet.add(g);
+        edges.push({ g, right, bottom });
+      };
+      addEdges(0);
+      for (let k = 1; k < Math.min(pages.length, 4); k++) {
+        const m = new THREE.Mesh(new THREE.PlaneGeometry(1, 1),
+          new THREE.MeshBasicMaterial({ color: 0xffffff, clippingPlanes: clips, transparent: true, toneMapped: false }));
+        m.position.z = 0.0035 - k * 0.004;
+        m.renderOrder = photo.renderOrder - k * 0.1;
+        m.userData.isImage = true; m.userData.file = file;
+        sheet.add(m);
+        file.mats.push(m.material);
+        back.push(m);
+        addEdges(k);
+      }
+    }
+    const maxW = folderW - 0.12, maxH = folderH * 0.9, pad = 0.04;
+    const fit = tex => {
+      const img = tex.image;
+      const aspect = img.width / img.height;
+      let w = maxW, h = w / aspect;
+      if (h > maxH) { h = maxH; w = h * aspect; }
+      file.img = img;
+      photo.material.map = tex;
+      photo.material.needsUpdate = true;
+      photo.scale.set(w, h, 1);
+      photo.position.y = h / 2 + pad;
+      border.scale.set(w + pad * 2, h + pad * 2, 1);
+      border.position.y = h / 2 + pad;
+      back.forEach((m, j) => {
+        const k = j + 1;
+        m.scale.set(w, h, 1);
+        m.position.x = k * STACK_OFF;
+        m.position.y = h / 2 + pad + k * STACK_OFF * 0.8;
+        m.rotation.z = (k % 2 ? -1 : 1) * 0.012 * k;
+      });
+      // edge lines follow their page (0 = front page)
+      edges.forEach(({ g, right, bottom }, k) => {
+        const src = k === 0 ? photo : back[k - 1];
+        g.position.x = src.position.x;
+        g.position.y = src.position.y;
+        g.rotation.z = src.rotation.z;
+        right.scale.set(PAGE_EDGE, h, 1);
+        right.position.set(w / 2 - PAGE_EDGE / 2, 0, 0);
+        bottom.scale.set(w, PAGE_EDGE, 1);
+        bottom.position.set(0, -h / 2 + PAGE_EDGE / 2, 0);
+      });
+      file.imgH = h + pad * 2 + back.length * STACK_OFF * 0.8;
+      file.imgW = w + pad * 2 + back.length * STACK_OFF * 2;
+    };
+    fit(placeholderImage(name, i + index * 8));
+    if (imageUrl) {
+      new THREE.TextureLoader().load(imageUrl, tex => {
+        tex.colorSpace = THREE.SRGBColorSpace;
+        tex.anisotropy = 8;
+        fit(tex);
+      });
+    }
+    pivot.add(box(folderW, folderH * 0.86, 0.008, folderMat, 0, folderH * 0.43, 0.012));
+
+    // tab, staggered left / centre / right
+    const tabX = [-1, 0, 1][i % 3] * (folderW / 2 - tabW / 2 - 0.04);
+    const tabMats = [folderMat, folderMat, folderMat, folderMat,
+      new THREE.MeshStandardMaterial({ map: tabTexture(name, color), roughness: 0.8 }),
+      folderMat];
+    const tab = shadowed(new THREE.Mesh(new THREE.BoxGeometry(tabW, tabH, 0.008), tabMats));
+    tab.position.set(tabX, folderH + tabH / 2 - 0.005, -0.012);
+    pivot.add(tab);
+
+    file.depth = depth;
+    file.folderH = folderH;
+    file.name = name;
+    file.caption = typeof entry === 'string' ? '' : entry.caption || '';
+    border.userData.isImage = photo.userData.isImage = true;
+    border.userData.file = photo.userData.file = file;
+    files.push(file);
+  });
+
+  return {
+    group, files, index, slotBottom,
+    ext: 0, target: 0,
+    current: -1,        // index of the file being shown, -1 = closed
+    card, labelTex: card.material.map, labelTexHover: labelCardTexture(def.label, def.sub, LABEL_HOVER_INK),
+  };
+}
+
+/* ------------------------------------------------------------------
+   Interaction: click a drawer to open it to the first file, use the
+   arrows (buttons or keyboard) to step through files, click again to close.
+------------------------------------------------------------------- */
+const raycaster = new THREE.Raycaster();
+const pointer = new THREE.Vector2();
+const canvas = renderer.domElement;
+const prevBtn = document.getElementById('prev');
+const nextBtn = document.getElementById('next');
+const countEl = document.getElementById('count');
+const captionEl = document.getElementById('caption');
+let openDrawer = null;     // the drawer currently being browsed
+let pendingOpen = null;    // drawer waiting for another to close first
+
+function extFor(d, i) {
+  return Math.min(MAX_EXT, d.files[i].depth + FT + 0.03 + REVEAL);
+}
+
+function pick(clientX, clientY) {
+  const r = canvas.getBoundingClientRect();
+  pointer.x = ((clientX - r.left) / r.width) * 2 - 1;
+  pointer.y = -((clientY - r.top) / r.height) * 2 + 1;
+  raycaster.setFromCamera(pointer, camera);
+  const hits = raycaster.intersectObjects(drawers.map(d => d.group), true);
+  // images are drawn on top, so let a hit on a raised image win
+  for (const h of hits) {
+    if (h.object.userData.isImage && h.object.material.depthTest === false) return { image: h.object.userData.file };
+  }
+  if (!hits.length) return null;
+  let o = hits[0].object;
+  while (o && !drawers.some(d => d.group === o)) o = o.parent;
+  return { drawer: drawers.find(d => d.group === o) };
+}
+
+function updateUI() {
+  const d = openDrawer;
+  const show = !!d && d.current >= 0;
+  prevBtn.classList.toggle('show', show);
+  nextBtn.classList.toggle('show', show);
+  countEl.classList.toggle('show', show);
+  captionEl.classList.toggle('show', show);
+  if (!show) return;
+  captionEl.innerHTML = d.files[d.current].caption || '';
+  prevBtn.disabled = d.current === 0;
+  nextBtn.disabled = d.current === d.files.length - 1;
+  countEl.textContent = d.files[d.current].name;
+}
+
+function showFile(d, i) {
+  d.current = i;
+  d.target = extFor(d, i);
+  updateUI();
+}
+
+function open(d) {
+  if (openDrawer && openDrawer !== d) {
+    pendingOpen = d;          // close the other one first
+    close(openDrawer);
+    return;
+  }
+  openDrawer = d;
+  showFile(d, 0);
+  frameCamera();
+}
+
+function close(d) {
+  if (lightboxOpen) closeLightbox();
+  d.current = -1;
+  d.closing = true;           // drawer waits for the image to sink, then slides in
+  if (openDrawer === d) openDrawer = null;
+  frameCamera();
+  updateUI();
+}
+
+function step(dir) {
+  const d = openDrawer;
+  if (!d) return;
+  const i = THREE.MathUtils.clamp(d.current + dir, 0, d.files.length - 1);
+  if (i !== d.current) showFile(d, i);
+  if (lightboxOpen) fillLightbox();
+}
+
+/* Lightbox: full view of the current image */
+const lightbox = document.getElementById('lightbox');
+const lbInner = lightbox.querySelector('.lb-inner');
+let lightboxOpen = false;
+function fillLightbox() {
+  const f = openDrawer.files[openDrawer.current];
+  lbInner.innerHTML = '';
+  const srcs = f.pages || [f.img instanceof HTMLCanvasElement ? f.img.toDataURL('image/jpeg', 0.92) : f.img.src];
+  lightbox.classList.toggle('pages', srcs.length > 1);
+  srcs.forEach((src, k) => {
+    const im = document.createElement('img');
+    im.src = src;
+    im.alt = srcs.length > 1 ? `${f.name}, page ${k + 1} of ${srcs.length}` : f.name;
+    if (k > 0) im.loading = 'lazy';
+    lbInner.appendChild(im);
+  });
+  lightbox.scrollTop = 0;
+}
+function openLightbox() {
+  fillLightbox();
+  lightboxOpen = true;
+  lightbox.classList.add('show');
+}
+function closeLightbox() {
+  lightboxOpen = false;
+  lightbox.classList.remove('show');
+}
+// click to close; in a multi-page document, clicking a page doesn't close (so you can scroll and read)
+lightbox.addEventListener('click', e => {
+  if (lightbox.classList.contains('pages') && e.target.tagName === 'IMG') return;
+  closeLightbox();
+});
+
+let downAt = null;
+canvas.addEventListener('pointerdown', e => { downAt = { x: e.clientX, y: e.clientY }; });
+canvas.addEventListener('pointerup', e => {
+  if (!downAt || Math.hypot(e.clientX - downAt.x, e.clientY - downAt.y) > 6) return;
+  const hit = pick(e.clientX, e.clientY);
+  if (hit && hit.image) {                         // clicking the raised picture expands it
+    if (openDrawer && hit.image === openDrawer.files[openDrawer.current]) openLightbox();
+    return;
+  }
+  if (hit && hit.drawer) {
+    if (hit.drawer === openDrawer) close(hit.drawer);
+    else open(hit.drawer);
+  } else if (openDrawer) {
+    close(openDrawer);                            // click on empty space closes
+  }
+});
+let hoverDrawer = null;
+function setHover(d) {
+  if (d === hoverDrawer) return;
+  if (hoverDrawer) { hoverDrawer.card.material.map = hoverDrawer.labelTex; hoverDrawer.card.material.needsUpdate = true; }
+  hoverDrawer = d;
+  if (d) { d.card.material.map = d.labelTexHover; d.card.material.needsUpdate = true; }
+}
+canvas.addEventListener('pointerleave', () => setHover(null));
+canvas.addEventListener('pointermove', e => {
+  const hit = pick(e.clientX, e.clientY);
+  canvas.style.cursor = hit && (hit.drawer || hit.image) ? (hit.image ? 'zoom-in' : 'pointer') : 'default';
+  setHover(hit && hit.drawer ? hit.drawer : null);
+});
+prevBtn.addEventListener('click', () => step(-1));
+nextBtn.addEventListener('click', () => step(1));
+window.addEventListener('keydown', e => {
+  if (e.key === 'ArrowLeft') { step(-1); e.preventDefault(); }
+  else if (e.key === 'ArrowRight') { step(1); e.preventDefault(); }
+  else if (e.key === 'Escape') { if (lightboxOpen) closeLightbox(); else if (openDrawer) close(openDrawer); }
+});
+
+/* ------------------------------------------------------------------
+   Animation
+------------------------------------------------------------------- */
+const ease = x => x * x * (3 - 2 * x);
+
+const _edge = new THREE.Vector3(), _toCam = new THREE.Vector3(), _n = new THREE.Vector3();
+const _up = new THREE.Vector3(), _pt = new THREE.Vector3(), _xAxis = new THREE.Vector3(1, 0, 0);
+function updateDrawer(d, dt) {
+  // a closing drawer waits until its images have sunk back into their folders
+  if (d.closing && d.files.every(f => f.lift < 0.15)) {
+    d.closing = false;
+    d.target = 0;
+  }
+  d.ext += (d.target - d.ext) * (1 - Math.exp(-dt * OPEN_SPEED));
+  if (Math.abs(d.target - d.ext) < 1e-4) d.ext = d.target;
+  d.group.position.z = FRONT_Z + d.ext;
+
+  // once a pending drawer's neighbour has closed, open it
+  if (pendingOpen && !drawers.some(o => o !== pendingOpen && (o.ext > 0.02 || o.closing))) {
+    const next = pendingOpen; pendingOpen = null; open(next);
+  }
+
+  d.files.forEach((f, i) => {
+    const emerged = d.ext - f.depth - FT - 0.03;   // how far past the cabinet front it is
+    // the current file rises once the drawer has brought it out far enough
+    const want = i === d.current && emerged > REVEAL * 0.75 ? 1 : 0;
+    f.lift = THREE.MathUtils.clamp(f.lift + Math.sign(want - f.lift) * dt / LIFT_TIME, 0, 1);
+    const p = ease(f.lift);
+    // nothing inside a shut drawer should show through the gaps between fronts,
+    // and pictures only show while they're being raised
+    f.pivot.visible = d.ext > 0.005;
+    f.sheet.visible = f.lift > 0;
+    f.pivot.position.y = 0.03 + SIDE_T + p * FOLDER_POP;
+    f.pivot.rotation.x = -p * 0.1;                  // lean back a touch
+    f.sheet.position.y = 0.02 + p * (f.folderH + 0.12);
+    f.sheet.rotation.x = -p * 0.28;                 // tilt the print to face the viewer
+    f.sheet.scale.setScalar(1 + p * ((f.grow || IMAGE_GROW) - 1)); // grow as it rises (grows up from its bottom edge)
+
+    // while raised (and outside the cabinet) draw the image over everything
+    const overlay = p > 0.01 && emerged > 0;
+    for (const m of f.mats) { m.depthTest = !overlay; m.depthWrite = !overlay; }
+  });
+
+  // clip planes: hide the part inside the folder and behind the drawer front
+  d.group.updateMatrixWorld(true);
+  _edge.set(0, SLOT_H - 0.0225, FT + 0.002).add(d.group.position);
+  _toCam.copy(camera.position).sub(_edge);
+  _n.crossVectors(_toCam, _xAxis).normalize();
+  for (const f of d.files) {
+    f.clips[1].setFromNormalAndCoplanarPoint(_n, _edge);
+    _up.set(0, 1, 0).transformDirection(f.pivot.matrixWorld);
+    _pt.set(0, f.folderH * 0.86, 0.02);
+    f.pivot.localToWorld(_pt);
+    f.clips[0].setFromNormalAndCoplanarPoint(_up, _pt);
+  }
+}
+
+/* ------------------------------------------------------------------
+   Camera: zoom is fixed to fit the closed cabinet. Clicking a drawer pans
+   the view once to centre that drawer and its raised image; the view then
+   stays put while the drawer opens and while stepping through files.
+------------------------------------------------------------------- */
+const fitCam = new THREE.PerspectiveCamera();
+const baseView = { target: new THREE.Vector3(), dist: 12 };
+
+function fits(target, dist, pts, margin) {
+  fitCam.position.copy(target).addScaledVector(camDir, dist);
+  fitCam.lookAt(target);
+  fitCam.updateMatrixWorld();
+  fitCam.updateProjectionMatrix();
+  const v = new THREE.Vector3();
+  let minY = Infinity, maxY = -Infinity;
+  for (const p of pts) {
+    v.copy(p).project(fitCam);
+    if (Math.abs(v.x) > margin) return { ok: false };
+    minY = Math.min(minY, v.y); maxY = Math.max(maxY, v.y);
+  }
+  return { ok: minY > -margin && maxY < margin, minY, maxY };
+}
+
+// fit the closed cabinet (with room in front for an open drawer)
+function fitBaseView() {
+  fitCam.fov = camera.fov; fitCam.aspect = camera.aspect;
+  fitCam.near = camera.near; fitCam.far = camera.far;
+  const pts = [];
+  for (const x of [-W / 2, W / 2]) for (const y of [0, H]) for (const z of [-D / 2, FRONT_Z + 0.6])
+    pts.push(new THREE.Vector3(x, y, z));
+  const target = new THREE.Box3().setFromPoints(pts).getCenter(new THREE.Vector3());
+  let lo = 3, hi = 60;
+  for (let it = 0; it < 30; it++) {
+    const mid = (lo + hi) / 2;
+    if (fits(target, mid, pts, 0.86).ok) hi = mid; else lo = mid;
+  }
+  baseView.target.copy(target);
+  baseView.dist = hi;
+}
+
+// world-space top of a file's fully raised image
+function imageTop(d, i) {
+  const f = d.files[i];
+  const ext = extFor(d, i);
+  const h = f.imgH * f.grow, tilt = 0.28;
+  return new THREE.Vector3(0,
+    d.slotBottom + 0.055 + FOLDER_POP + 0.02 + f.folderH + 0.12 + h * Math.cos(tilt),
+    FRONT_Z + ext - f.depth - h * Math.sin(tilt));
+}
+
+function frameCamera() {
+  camGoal.dist = baseView.dist;
+  const d = openDrawer;
+  if (!d || d.current < 0) { camGoal.target.copy(baseView.target); return; }
+  const tan = Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
+  // how big each image may get: as large as possible while fitting the screen
+  for (const f of d.files) {
+    const camZ = baseView.target.z + camDir.z * baseView.dist;
+    const distToImg = Math.max(1, camZ - (FRONT_Z + extFor(d, d.files.indexOf(f)) - f.depth));
+    const visH = 2 * tan * distToImg, visW = visH * camera.aspect;
+    f.grow = Math.min(IMAGE_GROW, FIT_WIDTH * visW / f.imgW, FIT_HEIGHT * visH / f.imgH);
+  }
+  // pan vertically (no zoom) so the tallest raised image sits just below the top edge
+  const target = baseView.target.clone();
+  const v = new THREE.Vector3();
+  for (let k = 0; k < 8; k++) {
+    fitCam.position.copy(target).addScaledVector(camDir, baseView.dist);
+    fitCam.lookAt(target);
+    fitCam.updateMatrixWorld();
+    let maxY = -Infinity;
+    for (let i = 0; i < d.files.length; i++) maxY = Math.max(maxY, v.copy(imageTop(d, i)).project(fitCam).y);
+    target.y += (maxY - (1 - TOP_MARGIN * 2)) * tan * baseView.dist;
+  }
+  camGoal.target.copy(target);
+}
+
+function updateCamera(dt, snap) {
+  const k = snap ? 1 : 1 - Math.exp(-dt * CAM_SPEED);
+  camTarget.lerp(camGoal.target, k);
+  camDist += (camGoal.dist - camDist) * k;
+  camera.position.copy(camTarget).addScaledVector(camDir, camDist);
+  camera.lookAt(camTarget);
+}
+
+/* ------------------------------------------------------------------
+   Layout
+------------------------------------------------------------------- */
+function resize() {
+  const w = stage.clientWidth, h = stage.clientHeight;
+  renderer.setSize(w, h, false);
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+  fitBaseView();
+  frameCamera();
+}
+window.addEventListener('resize', resize);
+
+/* ------------------------------------------------------------------
+   Boot (wait for the typewriter font so canvas labels use it)
+------------------------------------------------------------------- */
+try {
+  await Promise.race([
+    document.fonts.load('40px "Special Elite"'),
+    new Promise(r => setTimeout(r, 1500)),
+  ]);
+} catch (_) { /* fall back to Courier */ }
+
+DRAWERS.forEach((def, i) => drawers.push(buildDrawer(def, i)));
+resize();
+updateCamera(0, true);
+
+// handy for testing from the console
+window.cabinetDebug = {
+  drawers, open, close, openLightbox, next: () => step(1), prev: () => step(-1),
+  step(dt) { updateCamera(dt); drawers.forEach(d => updateDrawer(d, dt)); renderer.render(scene, camera); },
+};
+
+const clock = new THREE.Clock();
+renderer.setAnimationLoop(() => {
+  const dt = Math.min(clock.getDelta(), 0.05);
+  updateCamera(dt);
+  drawers.forEach(d => updateDrawer(d, dt));
+  renderer.render(scene, camera);
+});
+</script>
+</body>
+</html>
